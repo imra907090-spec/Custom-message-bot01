@@ -27,7 +27,7 @@ creds_dict = json.loads(os.getenv("GOOGLE_JSON"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 # নিশ্চিত করুন আপনার গুগল শিটের নাম এখানে "MyDataSheet" দেওয়া আছে
-sheet = client.open("mydata").sheet1
+sheet = client.open("MyData").sheet1
 
 # বট ইনিশিয়ালাইজেশন
 bot = Bot(token=BOT_TOKEN)
