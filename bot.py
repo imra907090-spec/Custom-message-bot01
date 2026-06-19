@@ -1,200 +1,266 @@
-import logging
 import os
-import uuid
-import gspread
-import json
-import xml.etree.ElementTree as ET
-from datetime import datetime
-from oauth2client.service_account import ServiceAccountCredentials
+import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.filters import CommandStart, Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 
-# এনভায়রনমেন্ট লোড করা
 load_dotenv()
-
-# Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-SHEET_NAME = os.getenv("SHEET_NAME")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))  # আপনার টেলিগ্রাম আইডি
 
-# Google Sheets Setup
-scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-creds_dict = json.loads(os.getenv("GOOGLE_JSON"))
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-client = gspread.authorize(creds)
-# নিশ্চিত করুন আপনার গুগল শিটের নাম এখানে "MyDataSheet" দেওয়া আছে
-sheet = client.open("MyData").sheet1
-
-# বট ইনিশিয়ালাইজেশন
+logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ফাইল সাইজ লিমিট (১০ এমবি)
-MAX_FILE_SIZE = 10 * 1024 * 1024 
+# ইউজার ডাটা রাখার জন্য
+USERS_DB = set()
 
-class OrderState(StatesGroup):
-    waiting_for_file = State()
-    waiting_for_payment_method = State()
-    waiting_for_payment_number = State()
+# চ্যানেল কনফিগারেশন (বোটকে এই চ্যানেলগুলোতে অ্যাডমিন বানাতে হবে)
+CHANNEL_1 = "@+LuFONHIYykA2OWNl" 
+CHANNEL_2 = "@Cyber_Shield_official"
+CHANNEL_1_LINK = "https://t.me/+LuFONHIYykA2OWNl"
+CHANNEL_2_LINK = "https://t.me/Cyber_Shield_official"
 
-# --- Keyboards ---
-def get_main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Instagram", callback_data="insta_menu")]])
+# FSM স্টেটস (অ্যাডমিন প্যানেল এবং সাবমিট ট্র্যাকিংয়ের জন্য)
+class BotStates(StatesGroup):
+    waiting_for_submit = State()      # ইউজার যখন সাবমিট বাটনে চাপ দিয়ে ফাইল পাঠানোর অপেক্ষায় থাকবে
 
-def get_insta_submenu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Instagram 2FA Account", callback_data="type_2fa")],
-        [InlineKeyboardButton(text="Instagram Cookies Account", callback_data="type_cookies")]
-    ])
+class AdminStates(StatesGroup):
+    waiting_for_broadcast = State()
+    waiting_for_channels = State()
 
-def get_submit_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Submit", callback_data="ready_to_upload")]])
+# চ্যানেলে জয়েন আছে কিনা চেক করার ফাংশন
+async def check_user_joined(user_id: int) -> bool:
+    try:
+        member1 = await bot.get_chat_member(chat_id=CHANNEL_1, user_id=user_id)
+        member2 = await bot.get_chat_member(chat_id=CHANNEL_2, user_id=user_id)
+        
+        valid_statuses = ['member', 'administrator', 'creator']
+        if member1.status in valid_statuses and member2.status in valid_statuses:
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Error checking channel membership: {e}")
+        return False
 
-def get_payment_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Bkash", callback_data="pay_bkash"), InlineKeyboardButton(text="Nagad", callback_data="pay_nagad")],
-        [InlineKeyboardButton(text="Rocket", callback_data="pay_rocket"), InlineKeyboardButton(text="Binance", callback_data="pay_binance")]
-    ])
+# --- কিবোর্ডসমূহ ---
 
-def get_admin_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 Get All Data (XML)", callback_data="admin_get_data")],
-        [InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="🔍 Search Order", callback_data="admin_search")]
-    ])
+# ১. শুরুর ফোর্স জয়েন কিবোর্ড
+def get_join_keyboard():
+    buttons = [
+        [InlineKeyboardButton(text="📢 চ্যানেল ১-এ জয়েন করুন", url=CHANNEL_1_LINK)],
+        [InlineKeyboardButton(text="📢 চ্যানেল ২-এ জয়েন করুন", url=CHANNEL_2_LINK)],
+        [InlineKeyboardButton(text="✅ ভেরিফাই করুন", callback_data="verify_join")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- Logic ---
+# ২. ভেরিফাই হওয়ার পরের ইনস্টাগ্রাম কিবোর্ড
+def get_instagram_keyboard():
+    buttons = [
+        [InlineKeyboardButton(text="📸 ইনস্টাগ্রাম", callback_data="instagram_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Welcome to Secure Surf Zone X. Please verify your membership.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Join Channel 1", url="https://t.me/Cyber_Shield_official")],
-            [InlineKeyboardButton(text="Join Channel 2", url="https://t.me/+LuFONHIYykA2OWNl")],
-            [InlineKeyboardButton(text="Verify Join", callback_data="verified")]
-        ]))
+# ৩. ইনস্টাগ্রামে চাপ দেওয়ার পর "ইনস্টাগ্রাম টু এফ অ্যাকাউন্ট" কিবোর্ড
+def get_instagram_2fa_keyboard():
+    buttons = [
+        [InlineKeyboardButton(text="🔐 ইনস্টাগ্রাম টু এফ অ্যাকাউন্ট", callback_data="instagram_2fa")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-@dp.callback_query(F.data == "verified")
-async def process_verify(callback: types.CallbackQuery):
-    await callback.message.edit_text("Verified! Select Service:", reply_markup=get_main_menu())
+# ৪. ইনস্টাগ্রাম টু এফ-এ চাপ দেওয়ার পর "সাবমিট" কিবোর্ড
+def get_submit_keyboard():
+    buttons = [
+        [InlineKeyboardButton(text="📤 সাবমিট", callback_data="submit_files")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-@dp.callback_query(F.data == "insta_menu")
-async def insta_menu(callback: types.CallbackQuery):
-    await callback.message.edit_text("Select Account Type:", reply_markup=get_insta_submenu())
+# অ্যাডমিন প্যানেল কিবোর্ড
+def get_admin_keyboard():
+    buttons = [
+        [InlineKeyboardButton(text="📊 মোট ইউজার", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="📢 ব্রডকাস্ট", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="⚙️ চ্যানেল পরিবর্তন", callback_data="admin_channels")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-@dp.callback_query(F.data.startswith("type_"))
-async def select_type(callback: types.CallbackQuery, state: FSMContext):
-    service_type = callback.data.replace('type_', '').upper()
-    await state.update_data(service=service_type)
-    await callback.message.edit_text(f"Selected: {service_type}\nClick Submit to upload your file.", reply_markup=get_submit_kb())
 
-@dp.callback_query(F.data == "ready_to_upload")
-async def ready_to_upload(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Now, please send your file (Document only).")
-    await state.set_state(OrderState.waiting_for_file)
+# --- হ্যান্ডলারস ---
 
-@dp.message(OrderState.waiting_for_file, F.document)
-async def handle_file(message: types.Message, state: FSMContext):
-    if message.document.file_size > MAX_FILE_SIZE:
-        await message.answer("Error: File is too large! Max 10MB.")
+# /start কমান্ড
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear() # যেকোনো আগের স্টেট ক্লিয়ার করা
+    USERS_DB.add(message.from_user.id)
+    is_joined = await check_user_joined(message.from_user.id)
+    
+    if is_joined:
+        await message.answer(
+            f"👋 হ্যালো {message.from_user.first_name}!\n"
+            "আপনি অলরেডি ভেরিফাইড ইউজার। নিচের অপশনটি ব্যবহার করুন:",
+            reply_markup=get_instagram_keyboard()
+        )
+    else:
+        await message.answer(
+            "⚠️ **অ্যাক্সেস ব্লকড!**\n\n"
+            "বোটটি ব্যবহার করতে আপনাকে অবশ্যই আমাদের নিচের দুটি চ্যানেলে জয়েন করতে হবে। "
+            "জয়েন করার পর নিচের **'ভেরিফাই করুন'** বাটনে ক্লিক করুন evenings।",
+            reply_markup=get_join_keyboard(),
+            parse_mode="Markdown"
+        )
+
+# ভেরিফাই বাটন অ্যাকশন
+@dp.callback_query(F.data == "verify_join")
+async def verify_callback(callback: types.CallbackQuery):
+    is_joined = await check_user_joined(callback.from_user.id)
+    
+    if is_joined:
+        await callback.message.edit_text(
+            "✅ ভেরিফিকেশন সফল হয়েছে!\nনিচের বাটনে ক্লিক করুন:",
+            reply_markup=get_instagram_keyboard()
+        )
+    else:
+        await callback.answer(
+            "❌ আপনি এখনো দুটি চ্যানেলে জয়েন করেননি! দয়া করে জয়েন করে আবার ভেরিফাই করুন।", 
+            show_alert=True
+        )
+
+# ইনস্টাগ্রাম বাটন অ্যাকশন
+@dp.callback_query(F.data == "instagram_main")
+async def instagram_main_callback(callback: types.CallbackQuery):
+    is_joined = await check_user_joined(callback.from_user.id)
+    if not is_joined:
+        await callback.answer("⚠️ আপনি চ্যানেল থেকে লেফট নিয়েছেন! আবার জয়েন করুন।", show_alert=True)
+        return
+        
+    await callback.message.edit_text(
+        "📂 ইনস্টাগ্রাম মেন্যু:\nনিচের বাটনটি সিলেক্ট করুন।",
+        reply_markup=get_instagram_2fa_keyboard()
+    )
+
+# ইনস্টাগ্রাম টু এফ অ্যাকাউন্ট বাটন অ্যাকশন
+@dp.callback_query(F.data == "instagram_2fa")
+async def instagram_2fa_callback(callback: types.CallbackQuery):
+    is_joined = await check_user_joined(callback.from_user.id)
+    if not is_joined:
+        await callback.answer("⚠️ অনুগ্রহ করে প্রথমে চ্যানেলে জয়েন থাকুন।", show_alert=True)
         return
 
-    token = str(uuid.uuid4())[:8].upper()
-    await state.update_data(token=token, file_id=message.document.file_id, 
-                            file_name=message.document.file_name, 
-                            username=message.from_user.username, user_id=message.from_user.id)
+    # এখানে এখন সাবমিট বাটন শো করবে
+    await callback.message.edit_text(
+        "🔐 **ইনস্টাগ্রাম টু এফ অ্যাকাউন্ট সেকশন**\n\n"
+        "আপনার ফাইল সাবমিট করতে নিচের **'সাবমিট'** বাটনে ক্লিক করুন।",
+        reply_markup=get_submit_keyboard()
+    )
+    await callback.answer()
+
+# সাবমিট বাটন অ্যাকশন
+@dp.callback_query(F.data == "submit_files")
+async def submit_files_callback(callback: types.CallbackQuery, state: FSMContext):
+    is_joined = await check_user_joined(callback.from_user.id)
+    if not is_joined:
+        await callback.answer("⚠️ অনুগ্রহ করে প্রথমে চ্যানেলে জয়েন থাকুন।", show_alert=True)
+        return
+
+    # ইউজারকে ফাইল পাঠানোর স্টেটে নেওয়া হচ্ছে
+    await state.set_state(BotStates.waiting_for_submit)
     
-    await message.answer(f"File '{message.document.file_name}' received! Token: {token}.\nNow select your payment method.", reply_markup=get_payment_kb())
-    await state.set_state(OrderState.waiting_for_payment_method)
+    await callback.message.edit_text(
+        "📥 **ফাইল সাবমিট মোড অন হয়েছে!**\n\n"
+        "এখন আপনি আপনার যেকোনো ফাইল (ফটো, ভিডিও, ডকুমেন্ট বা অডিও) এখানে পাঠাতে পারেন।"
+    )
+    await callback.answer()
 
-@dp.callback_query(OrderState.waiting_for_payment_method, F.data.startswith("pay_"))
-async def process_payment(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(pay_method=callback.data.replace('pay_', ''))
-    await callback.message.edit_text("Success! Please send your payment number.")
-    await state.set_state(OrderState.waiting_for_payment_number)
+# ফাইল রিসিভার এবং অটো রিপ্লাই হ্যান্ডলার (ইউজার যখন সাবমিট মোডে থাকবে)
+@dp.message(BotStates.waiting_for_submit, F.document | F.photo | F.video | F.audio | F.voice)
+async def handle_incoming_files(message: types.Message, state: FSMContext):
+    is_joined = await check_user_joined(message.from_user.id)
+    if not is_joined:
+        await message.answer("⚠️ ফাইল পাঠাতে হলে প্রথমে চ্যানেলে জয়েন করে ভেরিফাই করুন!", reply_markup=get_join_keyboard())
+        await state.clear()
+        return
 
-@dp.message(OrderState.waiting_for_payment_number)
-async def finalize_order(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    payment_number = message.text
-    try:
-        row = [data['token'], data.get('username', 'None'), str(data['user_id']), str(datetime.now()), data['service'], data['pay_method'], payment_number, data['file_name'], data['file_id'], "Pending"]
-        sheet.append_row(row)
-        
-        admin_text = (f"✅ New Order!\nToken: {data['token']}\nType: {data['service']}\n"
-                      f"User: @{data.get('username', 'None')}\nPayment Number: {payment_number}\nFile: {data['file_name']}")
-        await bot.send_document(ADMIN_ID, data['file_id'], caption=admin_text)
-        await message.answer("Submission Successful! Your request is under review.")
-    except Exception as e:
-        await message.answer(f"Error saving data: {e}")
+    # এখানে আপনি ফাইলটি ডাউনলোড করার বা অ্যাডমিনকে ফরোয়ার্ড করার কোড রাখতে পারেন।
+    # উদাহরণস্বরূপ অ্যাডমিনকে ফরোয়ার্ড করতে চাইলে: 
+    # await message.forward(chat_id=ADMIN_ID)
+
+    # অটো রিপ্লাই মেসেজ
+    await message.reply(
+        "✅ **আপনার ফাইলটি সফলভাবে রিসিভ করা হয়েছে!**\n\n"
+        "আমাদের টিম খুব শীঘ্রই এটি রিভিউ করবে। ধন্যবাদ আমাদের সাথে থাকার জন্য। 😊"
+    )
+    
+    # ফাইল পাঠানো শেষ হলে স্টেট ক্লিয়ার করে দেওয়া হচ্ছে যাতে পরবর্তীতে আবার নরমালি বাটন চাপতে পারে
     await state.clear()
 
-# --- Admin Panel ---
+
+# --- অ্যাডমিন প্যানেল সেকশন ---
 
 @dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("🛡️ **Secure Surf Zone X Admin Panel**", reply_markup=get_admin_kb())
-    else:
-        await message.answer("আপনি অ্যাডমিন নন।")
+async def cmd_admin(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    await message.answer("⚙️ **স্বাগতম অ্যাডমিন প্যানেলে!**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
-@dp.callback_query(F.data.startswith("admin_"))
-async def admin_callback(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
-    action = callback.data.split("_")[1]
-    
-    if action == "get_data":
-        records = sheet.get_all_records()
-        root = ET.Element("SecureSurfZoneX_Data")
-        for record in records:
-            order = ET.SubElement(root, "Order")
-            for k, v in record.items():
-                child = ET.SubElement(order, str(k).replace(" ", "_"))
-                child.text = str(v)
-        file_path = "orders.xml"
-        tree = ET.ElementTree(root)
-        tree.write(file_path, encoding="utf-8", xml_declaration=True)
-        await callback.message.answer_document(FSInputFile(file_path))
-    elif action == "broadcast":
-        await callback.message.answer("ব্রডকাস্ট করতে লিখুন: /broadcast আপনার মেসেজ")
-    elif action == "search":
-        await callback.message.answer("সার্চ করতে লিখুন: /search [TOKEN]")
+    await callback.message.answer(f"📊 **বোটের বর্তমান অবস্থা:**\n👥 মোট ইউজার: {len(USERS_DB)} জন")
+    await callback.answer()
 
-@dp.message(Command("done"))
-async def mark_done(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.answer("📢 যে মেসেজটি সবার কাছে পাঠাতে চান, তা এখন লিখে পাঠান:")
+    await state.set_state(AdminStates.waiting_for_broadcast)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_broadcast)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await message.answer("🚀 ব্রডকাস্ট শুরু হয়েছে...")
+    success_count = 0
+    for user_id in list(USERS_DB):
         try:
-            token = message.text.split(" ")[1].upper()
-            cell = sheet.find(token)
-            sheet.update_cell(cell.row, 10, "Success")
-            user_id = sheet.cell(cell.row, 3).value
-            await bot.send_message(user_id, f"✅ আপনার অর্ডার সাকসেসফুল হয়েছে! টোকেন: {token}")
-            await message.answer(f"Token {token} marked Success!")
-        except: await message.answer("Error.")
+            await bot.send_message(chat_id=user_id, text=message.text)
+            success_count += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+    await message.answer(f"📢 ব্রডকাস্ট সম্পন্ন!\n✅ সফলভাবে পাঠানো হয়েছে: {success_count} জনের কাছে।")
+    await state.clear()
 
-@dp.message(Command("broadcast"))
-async def broadcast(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        text = message.text.replace("/broadcast ", "")
-        users = set(sheet.col_values(3)[1:])
-        for user_id in users:
-            try: await bot.send_message(user_id, text)
-            except: continue
-        await message.answer("Broadcast sent.")
+@dp.callback_query(F.data == "admin_channels")
+async def admin_channels_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.answer(
+        "⚙️ নতুন চ্যানেল সেট করতে নিচের ফরম্যাটে লিখে পাঠান:\n\n"
+        "`@চ্যানেল১|@চ্যানেল২|লিংক১|লিংক২`",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminStates.waiting_for_channels)
+    await callback.answer()
 
-@dp.message(Command("search"))
-async def search_order(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        try:
-            token = message.text.split(" ")[1].upper()
-            cell = sheet.find(token)
-            row = sheet.row_values(cell.row)
-            await message.answer(f"Token: {row[0]}\nStatus: {row[9]}\nFile: {row[7]}\nUser: @{row[1]}\nPayment Number: {row[6]}")
-        except: await message.answer("Token not found!")
+@dp.message(AdminStates.waiting_for_channels)
+async def process_channels_update(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    global CHANNEL_1, CHANNEL_2, CHANNEL_1_LINK, CHANNEL_2_LINK
+    try:
+        data = message.text.split("|")
+        if len(data) == 4:
+            CHANNEL_1, CHANNEL_2, CHANNEL_1_LINK, CHANNEL_2_LINK = [d.strip() for d in data]
+            await message.answer("✅ চ্যানেল এবং লিংক সফলভাবে আপডেট করা হয়েছে!")
+            await state.clear()
+        else:
+            await message.answer("❌ ফরম্যাট ঠিক নেই! আবার চেষ্টা করুন।")
+    except Exception as e:
+        await message.answer(f"❌ ভুল হয়েছে: {e}")
+
+async def main():
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    dp.run_polling(bot)
+    asyncio.run(main())
