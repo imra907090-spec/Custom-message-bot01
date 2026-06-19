@@ -16,18 +16,34 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ইউজার ডাটা রাখার জন্য
-USERS_DB = set()
+# --- টেক্সট ফাইল ডাটাবেজ সেটিংস (রিস্টার্ট দিলেও ইউজার হারাবে না) ---
+DB_FILE = "users.txt"
 
-# চ্যানেল কনফিগারেশন (বোটকে এই চ্যানেলগুলোতে অ্যাডমিন বানাতে হবে)
+def load_users():
+    if not os.path.exists(DB_FILE):
+        return set()
+    with open(DB_FILE, "r") as f:
+        return set(int(line.strip()) for line in f if line.strip().isdigit())
+
+def save_user(user_id):
+    users = load_users()
+    if user_id not in users:
+        with open(DB_FILE, "a") as f:
+            f.write(f"{user_id}\n")
+
+# বোট চালু হওয়ার সময় ইউজার লোড করা
+USERS_DB = load_users()
+
+# চ্যানেল কনফিগারেশন (বোটকে অবশ্যই এই চ্যানেলগুলোতে অ্যাডমিন বানাতে হবে)
+# আপনি চাইলে এগুলো সরাসরি এখান থেকে অথবা বোটের /admin প্যানেল থেকে পরিবর্তন করতে পারেন
 CHANNEL_1 = "@+LuFONHIYykA2OWNl" 
 CHANNEL_2 = "@Cyber_Shield_official"
 CHANNEL_1_LINK = "https://t.me/+LuFONHIYykA2OWNl"
 CHANNEL_2_LINK = "https://t.me/Cyber_Shield_official"
 
-# FSM স্টেটস (অ্যাডমিন প্যানেল এবং সাবমিট ট্র্যাকিংয়ের জন্য)
+# FSM স্টেটস
 class BotStates(StatesGroup):
-    waiting_for_submit = State()      # ইউজার যখন সাবমিট বাটনে চাপ দিয়ে ফাইল পাঠানোর অপেক্ষায় থাকবে
+    waiting_for_submit = State()      
 
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
@@ -35,6 +51,9 @@ class AdminStates(StatesGroup):
 
 # চ্যানেলে জয়েন আছে কিনা চেক করার ফাংশন
 async def check_user_joined(user_id: int) -> bool:
+    # অ্যাডমিন সব সময় বাইপাস পাবে (ভেরিফাই বাটন ঝামেলা করবে না)
+    if user_id == ADMIN_ID:
+        return True
     try:
         member1 = await bot.get_chat_member(chat_id=CHANNEL_1, user_id=user_id)
         member2 = await bot.get_chat_member(chat_id=CHANNEL_2, user_id=user_id)
@@ -94,21 +113,22 @@ def get_admin_keyboard():
 # /start কমান্ড
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear() # যেকোনো আগের স্টেট ক্লিয়ার করা
-    USERS_DB.add(message.from_user.id)
+    await state.clear() 
+    save_user(message.from_user.id) # ইউজার আইডি ফাইলে সেভ করা হচ্ছে
+    
     is_joined = await check_user_joined(message.from_user.id)
     
     if is_joined:
         await message.answer(
             f"👋 হ্যালো {message.from_user.first_name}!\n"
-            "আপনি অলরেডি ভেরিফাইড ইউজার। নিচের অপশনটি ব্যবহার করুন:",
+            "আপনি সফলভাবে ভেরিফাই হয়েছেন। নিচের অপশনটি ব্যবহার করুন:",
             reply_markup=get_instagram_keyboard()
         )
     else:
         await message.answer(
-            "⚠️ **অ্যাক্সেস ব্লকড!**\n\n"
+            "⚠️ **অ্যাক্সেস অ্যাকাউন্ট ব্লকড!**\n\n"
             "বোটটি ব্যবহার করতে আপনাকে অবশ্যই আমাদের নিচের দুটি চ্যানেলে জয়েন করতে হবে। "
-            "জয়েন করার পর নিচের **'ভেরিফাই করুন'** বাটনে ক্লিক করুন evenings।",
+            "জয়েন করার পর নিচের **'ভেরিফাই করুন'** বাটনে ক্লিক করুন।",
             reply_markup=get_join_keyboard(),
             parse_mode="Markdown"
         )
@@ -125,7 +145,7 @@ async def verify_callback(callback: types.CallbackQuery):
         )
     else:
         await callback.answer(
-            "❌ আপনি এখনো দুটি চ্যানেলে জয়েন করেননি! দয়া করে জয়েন করে আবার ভেরিফাই করুন।", 
+            "❌ আপনি এখনো দুটি চ্যানেলে জয়েন করেননি! দয়া করে দুটি চ্যানেলেই জয়েন করে আবার ভেরিফাই করুন।", 
             show_alert=True
         )
 
@@ -150,7 +170,6 @@ async def instagram_2fa_callback(callback: types.CallbackQuery):
         await callback.answer("⚠️ অনুগ্রহ করে প্রথমে চ্যানেলে জয়েন থাকুন।", show_alert=True)
         return
 
-    # এখানে এখন সাবমিট বাটন শো করবে
     await callback.message.edit_text(
         "🔐 **ইনস্টাগ্রাম টু এফ অ্যাকাউন্ট সেকশন**\n\n"
         "আপনার ফাইল সাবমিট করতে নিচের **'সাবমিট'** বাটনে ক্লিক করুন।",
@@ -166,7 +185,6 @@ async def submit_files_callback(callback: types.CallbackQuery, state: FSMContext
         await callback.answer("⚠️ অনুগ্রহ করে প্রথমে চ্যানেলে জয়েন থাকুন।", show_alert=True)
         return
 
-    # ইউজারকে ফাইল পাঠানোর স্টেটে নেওয়া হচ্ছে
     await state.set_state(BotStates.waiting_for_submit)
     
     await callback.message.edit_text(
@@ -175,7 +193,7 @@ async def submit_files_callback(callback: types.CallbackQuery, state: FSMContext
     )
     await callback.answer()
 
-# ফাইল রিসিভার এবং অটো রিপ্লাই হ্যান্ডলার (ইউজার যখন সাবমিট মোডে থাকবে)
+# ফাইল রিসিভার এবং অটো রিপ্লাই হ্যান্ডলার
 @dp.message(BotStates.waiting_for_submit, F.document | F.photo | F.video | F.audio | F.voice)
 async def handle_incoming_files(message: types.Message, state: FSMContext):
     is_joined = await check_user_joined(message.from_user.id)
@@ -184,31 +202,32 @@ async def handle_incoming_files(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # এখানে আপনি ফাইলটি ডাউনলোড করার বা অ্যাডমিনকে ফরোয়ার্ড করার কোড রাখতে পারেন।
-    # উদাহরণস্বরূপ অ্যাডমিনকে ফরোয়ার্ড করতে চাইলে: 
-    # await message.forward(chat_id=ADMIN_ID)
+    # ফাইলটি এডমিন আইডিতে ফরোয়ার্ড করার ব্যাকআপ সেটিংস
+    try:
+        await message.forward(chat_id=ADMIN_ID)
+    except Exception as e:
+        logging.error(f"Failed to forward file to admin: {e}")
 
-    # অটো রিপ্লাই মেসেজ
     await message.reply(
         "✅ **আপনার ফাইলটি সফলভাবে রিসিভ করা হয়েছে!**\n\n"
         "আমাদের টিম খুব শীঘ্রই এটি রিভিউ করবে। ধন্যবাদ আমাদের সাথে থাকার জন্য। 😊"
     )
-    
-    # ফাইল পাঠানো শেষ হলে স্টেট ক্লিয়ার করে দেওয়া হচ্ছে যাতে পরবর্তীতে আবার নরমালি বাটন চাপতে পারে
     await state.clear()
 
 
-# --- অ্যাডমিন প্যানেল সেকশন ---
+# --- অ্যাডমিন প্যানেল সেকশন (সম্পূর্ণ ফিক্সড) ---
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if message.from_user.id != ADMIN_ID: 
+        return # অ্যাডমিন না হলে কোনো মেসেজ বা এরর ও দেবে না
     await message.answer("⚙️ **স্বাগতম অ্যাডমিন প্যানেলে!**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
-    await callback.message.answer(f"📊 **বোটের বর্তমান অবস্থা:**\n👥 মোট ইউজার: {len(USERS_DB)} জন")
+    current_users = load_users()
+    await callback.message.answer(f"📊 **বোটের বর্তমান অবস্থা:**\n👥 মোট একটিভ ইউজার: {len(current_users)} জন")
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_broadcast")
@@ -223,7 +242,9 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("🚀 ব্রডকাস্ট শুরু হয়েছে...")
     success_count = 0
-    for user_id in list(USERS_DB):
+    current_users = load_users()
+    
+    for user_id in current_users:
         try:
             await bot.send_message(chat_id=user_id, text=message.text)
             success_count += 1
@@ -238,8 +259,7 @@ async def admin_channels_start(callback: types.CallbackQuery, state: FSMContext)
     if callback.from_user.id != ADMIN_ID: return
     await callback.message.answer(
         "⚙️ নতুন চ্যানেল সেট করতে নিচের ফরম্যাটে লিখে পাঠান:\n\n"
-        "`@চ্যানেল১|@চ্যানেল২|লিংক১|লিংক২`",
-        parse_mode="Markdown"
+        "`@চ্যানেল১|@চ্যানেল২|লিংক১|লিংক২`"
     )
     await state.set_state(AdminStates.waiting_for_channels)
     await callback.answer()
