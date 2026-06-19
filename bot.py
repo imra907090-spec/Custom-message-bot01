@@ -36,9 +36,9 @@ USERS_DB = load_users()
 
 # চ্যানেল কনফিগারেশন (বোটকে অবশ্যই এই চ্যানেলগুলোতে অ্যাডমিন বানাতে হবে)
 # আপনি চাইলে এগুলো সরাসরি এখান থেকে অথবা বোটের /admin প্যানেল থেকে পরিবর্তন করতে পারেন
-CHANNEL_1 = "@+LuFONHIYykA2OWNl" 
+CHANNEL_1 = "@trusted_buy_sell_B" 
 CHANNEL_2 = "@Cyber_Shield_official"
-CHANNEL_1_LINK = "https://t.me/+LuFONHIYykA2OWNl"
+CHANNEL_1_LINK = "https://t.me/trusted_buy_sell_B"
 CHANNEL_2_LINK = "https://t.me/Cyber_Shield_official"
 
 # FSM স্টেটস
