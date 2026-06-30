@@ -21,14 +21,23 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Mock Database (In real projects, use SQLite or MongoDB/Firebase)
-# user_id: {"balance": 0, "referred_by": None, "referrals": 0}
+# user_id: {"balance": 0, "referred_by": None, "referrals": 0, "reward_given": False}
 user_db = {}
 
-# --- States for Withdrawal Flow ---
+# System Settings Database (Global configuration)
+system_config = {
+    "refer_bonus": 2  # Default bonus amount is ৳2
+}
+
+# --- States for Flows ---
 class WithdrawState(StatesGroup):
     waiting_for_method = State()
     waiting_for_number = State()
     waiting_for_amount = State()
+
+class AdminState(StatesGroup):
+    waiting_for_search_id = State()
+    waiting_for_bonus_amount = State()
 
 # --- Helper Functions ---
 async def check_membership(user_id: int) -> bool:
@@ -72,11 +81,24 @@ def get_payment_keyboard():
         [InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_to_menu")]
     ])
 
+def get_back_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_to_menu")]
+    ])
+
+def get_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Search User Balance", callback_data="admin_search_user")],
+        [InlineKeyboardButton(text="⚙️ Change Refer Bonus", callback_data="admin_change_bonus")],
+        [InlineKeyboardButton(text="❌ Close Admin Panel", callback_data="back_to_menu")]
+    ])
+
 # --- Handlers ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
+    bonus = system_config["refer_bonus"]
     
     # Initialize user in database if not exists
     if user_id not in user_db:
@@ -95,14 +117,13 @@ async def cmd_start(message: types.Message):
 
     # Force check membership on start
     if await check_membership(user_id):
-        # If already joined, award points if they were referred by someone
         ref_by = user_db[user_id]["referred_by"]
         if ref_by and user_db[user_id].get("reward_given") is not True:
-            user_db[ref_by]["balance"] += 2  
+            user_db[ref_by]["balance"] += bonus  
             user_db[ref_by]["referrals"] += 1
             user_db[user_id]["reward_given"] = True
             try:
-                await bot.send_message(ref_by, f"🎉 New Referral! User joined via your link. Added ৳2 to your balance.")
+                await bot.send_message(ref_by, f"🎉 New Referral! User joined via your link. Added ৳{bonus} to your balance.")
             except Exception:
                 pass
                 
@@ -116,33 +137,28 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(F.data == "verify_join")
 async def process_verify(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    bonus = system_config["refer_bonus"]
     
-    # Check if user database has this record (failsafe)
     if user_id not in user_db:
         user_db[user_id] = {"balance": 0, "referred_by": None, "referrals": 0}
 
     if await check_membership(user_id):
-        # Process referral reward upon successful verification if applicable
         ref_by = user_db[user_id].get("referred_by")
         if ref_by and user_db[user_id].get("reward_given") is not True:
-            user_db[ref_by]["balance"] += 2  
+            user_db[ref_by]["balance"] += bonus  
             user_db[ref_by]["referrals"] += 1
             user_db[user_id]["reward_given"] = True
             try:
-                await bot.send_message(ref_by, f"🎉 New Referral Verified! Added ৳2 to your balance.")
+                await bot.send_message(ref_by, f"🎉 New Referral Verified! Added ৳{bonus} to your balance.")
             except Exception:
                 pass
 
-        # Answer callback to prevent Telegram loading wheel freeze
-        await callback.answer("✅ Verification Successful!", show_alert=False)
-        
-        # Successfully open the dashboard
+        await callback.answer("⏳ Processing... Done!", show_alert=False) # Click Animation Effect
         await callback.message.edit_text(
             "✅ Verification Successful!\nWelcome to the Main Dashboard. Choose your service:",
             reply_markup=get_main_menu()
         )
     else:
-        # Alert user if they still haven't joined
         await callback.answer("❌ Verification Failed! You haven't joined both channels yet.", show_alert=True)
 
 # --- Dashboard Handlers ---
@@ -157,59 +173,67 @@ async def show_balance(callback: types.CallbackQuery):
         f"💰 Current Balance: ৳{data['balance']}\n"
         f"👥 Total Referrals: {data['referrals']} Users\n"
     )
-    await callback.message.edit_text(text, reply_markup=get_main_menu())
-    await callback.answer()
+    await callback.answer("⚡ Loading Balance...", show_alert=False) # Animation Effect
+    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
 
 @dp.callback_query(F.data == "menu_referral")
 async def show_referral(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     bot_info = await bot.get_me()
+    bonus = system_config["refer_bonus"]
     
-    # Generate unique referral link
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
     
     text = (
         f"🔗 **Your Unique Referral Link**\n\n"
-        f"Share this link with your friends. When they join and verify, you'll earn ৳2 rewards!\n\n"
+        f"Share this link with your friends. When they join and verify, you'll earn ৳{bonus} rewards!\n\n"
         f"`{ref_link}`"
     )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_menu())
-    await callback.answer()
+    
+    # Inline Share Button + Back Button Markup
+    referral_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Share Now", switch_inline_query=f"\nJoin here to earn rewards: {ref_link}")],
+        [InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_to_menu")]
+    ])
+    
+    await callback.answer("🔗 Generating Unique Link...", show_alert=False) # Animation Effect
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=referral_keyboard)
 
 @dp.callback_query(F.data == "menu_payment")
 async def show_payment_methods(callback: types.CallbackQuery):
+    await callback.answer("💳 Opening Payout Gateways...", show_alert=False)
     await callback.message.edit_text(
         "💳 **Select Your Preferred Payment Gateway:**\n\nPlease select one of the following providers to proceed with setup or payout.",
         reply_markup=get_payment_keyboard()
     )
-    await callback.answer()
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def process_payment_selection(callback: types.CallbackQuery, state: FSMContext):
     method = callback.data.replace("pay_", "").capitalize()
     
     await state.update_data(withdraw_method=method)
-    await callback.message.answer(f"Selected Payment Method: {method}\n\n📝 Please enter your {method} Account Number/ID:")
+    await callback.answer(f"Selected Gateway: {method}", show_alert=False)
+    await callback.message.answer(f"🏦 Gateway: {method}\n\n📝 Please enter your {method} Account Number/ID:")
     await state.set_state(WithdrawState.waiting_for_number)
-    await callback.answer()
 
 @dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: types.CallbackQuery):
+async def back_to_menu(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer("🔙 Heading Back...", show_alert=False)
     await callback.message.edit_text(
         "✨ Main Dashboard Menu:\nSelect an option from the menu below:",
         reply_markup=get_main_menu()
     )
-    await callback.answer()
 
 # --- Automatic Withdraw System Handlers ---
 
 @dp.callback_query(F.data == "menu_withdraw")
 async def start_withdraw_flow(callback: types.CallbackQuery):
+    await callback.answer("💸 Launching Payout System...", show_alert=False)
     await callback.message.edit_text(
         "💸 **Withdrawal System**\n\nPlease select your payment gateway to withdraw money:",
         reply_markup=get_payment_keyboard()
     )
-    await callback.answer()
 
 @dp.message(WithdrawState.waiting_for_number)
 async def process_withdraw_number(message: types.Message, state: FSMContext):
@@ -272,6 +296,73 @@ async def process_withdraw_amount(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Failed to send withdrawal notice to admin: {e}")
         
+    await state.clear()
+
+# --- Admin Panel Handlers ---
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return # Standard safeguard block for non-admins
+        
+    current_bonus = system_config["refer_bonus"]
+    await message.answer(
+        f"🛡️ **Welcome to Secure Surf Zone X Admin Control**\n\n"
+        f"⚙️ Current Refer Bonus: ৳{current_bonus}\n"
+        f"Select an operation below:", 
+        reply_markup=get_admin_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin_search_user")
+async def admin_search_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.answer("🔍 Awaiting User ID...", show_alert=False)
+    await callback.message.answer("📝 Please send the target User's Telegram ID to inspect details:")
+    await state.set_state(AdminState.waiting_for_search_id)
+
+@dp.message(AdminState.waiting_for_search_id)
+async def admin_process_search(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        target_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Invalid ID! Please send numbers only:")
+        return
+        
+    if target_id in user_db:
+        data = user_db[target_id]
+        await message.answer(
+            f"🔍 **User Profile Data (ID: `{target_id}`)**\n\n"
+            f"💰 Balance: ৳{data['balance']}\n"
+            f"👥 Referrals: {data['referrals']} Users\n"
+            f"🔗 Referred By: `{data['referred_by']}`",
+            reply_markup=get_admin_keyboard()
+        )
+    else:
+        await message.answer("❌ User not found in temporary mock database!", reply_markup=get_admin_keyboard())
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_change_bonus")
+async def admin_bonus_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.answer("⚙️ Loading Configuration...", show_alert=False)
+    await callback.message.answer("📝 Enter new Refer Reward Amount (e.g., 5, 10):")
+    await state.set_state(AdminState.waiting_for_bonus_amount)
+
+@dp.message(AdminState.waiting_for_bonus_amount)
+async def admin_process_bonus(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        new_amount = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Invalid digits! Send integer number:")
+        return
+
+    system_config["refer_bonus"] = new_amount
+    await message.answer(
+        f"✅ **Configuration Saved!**\nNew Refer Reward is now set to: **৳{new_amount}**", 
+        reply_markup=get_admin_keyboard()
+    )
     await state.clear()
 
 if __name__ == "__main__":
