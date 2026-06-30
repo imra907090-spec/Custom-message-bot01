@@ -54,8 +54,8 @@ def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Check Balance", callback_data="menu_balance")],
         [InlineKeyboardButton(text="🔗 Referral Link", callback_data="menu_referral")],
-        [InlineKeyboardButton(text="💳 Payment Method / Withdraw", callback_data="menu_payment")], # Updated Text
-        [InlineKeyboardButton(text="💸 Withdraw Cash", callback_data="menu_withdraw")], # New Auto Inline Withdraw Button
+        [InlineKeyboardButton(text="💳 Payment Method / Withdraw", callback_data="menu_payment")], 
+        [InlineKeyboardButton(text="💸 Withdraw Cash", callback_data="menu_withdraw")], 
         [InlineKeyboardButton(text="👨‍💻 Support Admin", url=f"https://t.me/{ADMIN_USERNAME}")]
     ])
 
@@ -98,7 +98,7 @@ async def cmd_start(message: types.Message):
         # If already joined, award points if they were referred by someone
         ref_by = user_db[user_id]["referred_by"]
         if ref_by and user_db[user_id].get("reward_given") is not True:
-            user_db[ref_by]["balance"] += 2  # Updated: Changed from 10 to 2 Taka per referral
+            user_db[ref_by]["balance"] += 2  
             user_db[ref_by]["referrals"] += 1
             user_db[user_id]["reward_given"] = True
             try:
@@ -117,11 +117,15 @@ async def cmd_start(message: types.Message):
 async def process_verify(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
+    # Check if user database has this record (failsafe)
+    if user_id not in user_db:
+        user_db[user_id] = {"balance": 0, "referred_by": None, "referrals": 0}
+
     if await check_membership(user_id):
         # Process referral reward upon successful verification if applicable
         ref_by = user_db[user_id].get("referred_by")
         if ref_by and user_db[user_id].get("reward_given") is not True:
-            user_db[ref_by]["balance"] += 2  # Updated: Changed from 10 to 2 Taka per referral
+            user_db[ref_by]["balance"] += 2  
             user_db[ref_by]["referrals"] += 1
             user_db[user_id]["reward_given"] = True
             try:
@@ -129,11 +133,16 @@ async def process_verify(callback: types.CallbackQuery):
             except Exception:
                 pass
 
+        # Answer callback to prevent Telegram loading wheel freeze
+        await callback.answer("✅ Verification Successful!", show_alert=False)
+        
+        # Successfully open the dashboard
         await callback.message.edit_text(
             "✅ Verification Successful!\nWelcome to the Main Dashboard. Choose your service:",
             reply_markup=get_main_menu()
         )
     else:
+        # Alert user if they still haven't joined
         await callback.answer("❌ Verification Failed! You haven't joined both channels yet.", show_alert=True)
 
 # --- Dashboard Handlers ---
@@ -149,6 +158,7 @@ async def show_balance(callback: types.CallbackQuery):
         f"👥 Total Referrals: {data['referrals']} Users\n"
     )
     await callback.message.edit_text(text, reply_markup=get_main_menu())
+    await callback.answer()
 
 @dp.callback_query(F.data == "menu_referral")
 async def show_referral(callback: types.CallbackQuery):
@@ -164,6 +174,7 @@ async def show_referral(callback: types.CallbackQuery):
         f"`{ref_link}`"
     )
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_menu())
+    await callback.answer()
 
 @dp.callback_query(F.data == "menu_payment")
 async def show_payment_methods(callback: types.CallbackQuery):
@@ -171,12 +182,12 @@ async def show_payment_methods(callback: types.CallbackQuery):
         "💳 **Select Your Preferred Payment Gateway:**\n\nPlease select one of the following providers to proceed with setup or payout.",
         reply_markup=get_payment_keyboard()
     )
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def process_payment_selection(callback: types.CallbackQuery, state: FSMContext):
     method = callback.data.replace("pay_", "").capitalize()
     
-    # Automatically forward to withdrawal flow when they click a payment method
     await state.update_data(withdraw_method=method)
     await callback.message.answer(f"Selected Payment Method: {method}\n\n📝 Please enter your {method} Account Number/ID:")
     await state.set_state(WithdrawState.waiting_for_number)
@@ -188,8 +199,9 @@ async def back_to_menu(callback: types.CallbackQuery):
         "✨ Main Dashboard Menu:\nSelect an option from the menu below:",
         reply_markup=get_main_menu()
     )
+    await callback.answer()
 
-# --- New Automatic Withdraw System Handlers ---
+# --- Automatic Withdraw System Handlers ---
 
 @dp.callback_query(F.data == "menu_withdraw")
 async def start_withdraw_flow(callback: types.CallbackQuery):
@@ -197,6 +209,7 @@ async def start_withdraw_flow(callback: types.CallbackQuery):
         "💸 **Withdrawal System**\n\nPlease select your payment gateway to withdraw money:",
         reply_markup=get_payment_keyboard()
     )
+    await callback.answer()
 
 @dp.message(WithdrawState.waiting_for_number)
 async def process_withdraw_number(message: types.Message, state: FSMContext):
@@ -228,15 +241,13 @@ async def process_withdraw_amount(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Insufficient Balance! Your current balance is ৳{user_data['balance']}. Please enter a smaller amount:")
         return
 
-    # Deduct the amount and save remaining balance
+    # Deduct the amount
     user_db[user_id]["balance"] -= amount
     
-    # Get saved payment method and number
     data = await state.get_data()
     method = data.get("withdraw_method")
     account_number = data.get("account_number")
     
-    # Notify User
     await message.answer(
         f"✅ **Withdraw Request Submitted Successfully!**\n\n"
         f"💵 Amount: ৳{amount}\n"
@@ -247,11 +258,10 @@ async def process_withdraw_amount(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu()
     )
     
-    # Notify Admin (Sends full detail to Admin ID)
     admin_text = (
         f"🚨 **New Withdrawal Request Received!**\n\n"
         f"👤 User: {message.from_user.full_name} (ID: `{user_id}`)\n"
-        f" username: @{message.from_user.username if message.from_user.username else 'None'}\n"
+        f"Username: @{message.from_user.username if message.from_user.username else 'None'}\n"
         f"💵 Amount: **৳{amount}**\n"
         f"🏦 Method: **{method}**\n"
         f"📱 Account Number: `{account_number}`\n"
@@ -262,7 +272,6 @@ async def process_withdraw_amount(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Failed to send withdrawal notice to admin: {e}")
         
-    # Clear FSM State
     await state.clear()
 
 if __name__ == "__main__":
